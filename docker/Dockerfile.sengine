@@ -1,0 +1,32 @@
+# Overlay build: the official 4.41 image with one patched binary.
+#
+# We need seaweedfs/seaweedfs#11140 (filer.remote.sync never uploads a file
+# whose content is rewritten unchanged before it was first replicated) before
+# it lands in a release. That is a one-line change in the Go code, so this
+# rebuilds only `weed` and drops it onto the published 4.41 image.
+#
+# Deliberately NOT a fork of docker/Dockerfile.go_build. That file clones from
+# github.com/seaweedfs/seaweedfs at build time, so it would silently ignore
+# this branch's patch and produce a stock binary. It also builds the Rust
+# volume server and maintenance worker, or pulls them from CI artifacts —
+# reproducing that here would mean reproducing the whole release pipeline for
+# no gain. Taking the published image as the base keeps every other byte
+# (entrypoint, Rust binaries, labels) exactly as shipped, so the delta really
+# is the one commit.
+ARG BASE=chrislusf/seaweedfs:4.41
+
+FROM golang:1.25-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY . .
+ARG TARGETOS TARGETARCH
+# Same flags as the upstream image build: CGO-free, statically linked, and the
+# commit stamped into the version string so `weed version` identifies this
+# build rather than claiming to be stock 4.41.
+RUN cd weed \
+  && export LDFLAGS="-X github.com/seaweedfs/seaweedfs/weed/util/version.COMMIT=$(git rev-parse --short HEAD)" \
+  && export GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+  && CGO_ENABLED=0 go build -ldflags "-extldflags -static ${LDFLAGS}" -o /out/weed .
+
+FROM ${BASE}
+COPY --from=builder /out/weed /usr/bin/weed
