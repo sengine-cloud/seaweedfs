@@ -1,6 +1,7 @@
 package command
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -400,4 +401,37 @@ func TestMetadataOnlyUpdateRequiresRemoteEntry(t *testing.T) {
 			t.Error("a rename changes the remote key and must take the write path")
 		}
 	})
+}
+
+// TestIsSourceDataGone pins the classification that keeps one unreadable entry
+// from stopping replication for the whole cluster.
+//
+// The volume server answers 404 for a chunk whose file was deleted after the
+// event was recorded. That surfaces through the AWS SDK as a RequestError, and
+// "requesterror" is in util.transientErrorMessages, so util.Retry treats a
+// permanently-dead chunk as transient — retries it to exhaustion, fails the
+// event, and the subscription restarts from the last checkpoint straight back
+// into the same chunk.
+func TestIsSourceDataGone(t *testing.T) {
+	gone := errors.New(`upload to b2/tier/pvc-abc/tmp1__doc.pdf: RequestError: send request failed
+caused by: Put "https://s3.eu-central-003.backblazeb2.com/tier/pvc-abc/tmp1__doc.pdf": ` +
+		`http://seaweedfs-volume-0.seaweedfs-volume-peer.seaweedfs:8444/144,a38fe73705eb?readDeleted=true: 404 Not Found: not found`)
+	if !isSourceDataGone(gone) {
+		t.Error("a 404 from the volume server on the source read must be recognised as permanent")
+	}
+	// It is classified transient today, which is exactly the bug.
+	if !util.IsTransientError(gone) {
+		t.Log("note: util no longer reads this as transient; the skip is then belt-and-braces")
+	}
+
+	for name, err := range map[string]error{
+		"nil":                nil,
+		"genuine network":    errors.New("RequestError: send request failed caused by: dial tcp: i/o timeout"),
+		"remote 404":         errors.New(`Put "https://s3.example.com/tier/x": 404 Not Found`),
+		"unrelated notfound": errors.New("bucket not found"),
+	} {
+		if isSourceDataGone(err) {
+			t.Errorf("%s must not be treated as source-data-gone: %v", name, err)
+		}
+	}
 }

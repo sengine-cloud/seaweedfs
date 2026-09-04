@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -177,6 +178,15 @@ func (option *RemoteSyncOptions) makeEventProcessor(remoteStorage *remote_pb.Rem
 			}
 			glog.V(0).Infof("create %s", remote_storage.FormatLocation(dest))
 			remoteEntry, writeErr := retriedWriteFile(client, filerSource, message.NewEntry, dest)
+			if errors.Is(writeErr, ErrSourceDataGone) {
+				// Skip it. Failing here fails the whole subscription, which
+				// restarts from the last checkpoint and replays straight back
+				// into the same dead chunk -- one unreadable entry stops
+				// replication for every directory, indefinitely. Loud, because
+				// the object genuinely will not reach the remote.
+				glog.Errorf("skipping %s: %v", remote_storage.FormatLocation(dest), writeErr)
+				return nil
+			}
 			if writeErr != nil {
 				return writeErr
 			}
@@ -236,6 +246,15 @@ func (option *RemoteSyncOptions) makeEventProcessor(remoteStorage *remote_pb.Rem
 				}
 			}
 			remoteEntry, writeErr := retriedWriteFile(client, filerSource, message.NewEntry, dest)
+			if errors.Is(writeErr, ErrSourceDataGone) {
+				// Skip it. Failing here fails the whole subscription, which
+				// restarts from the last checkpoint and replays straight back
+				// into the same dead chunk -- one unreadable entry stops
+				// replication for every directory, indefinitely. Loud, because
+				// the object genuinely will not reach the remote.
+				glog.Errorf("skipping %s: %v", remote_storage.FormatLocation(dest), writeErr)
+				return nil
+			}
 			if writeErr != nil {
 				return writeErr
 			}
@@ -247,17 +266,48 @@ func (option *RemoteSyncOptions) makeEventProcessor(remoteStorage *remote_pb.Rem
 	return eachEntryFunc, nil
 }
 
+// ErrSourceDataGone reports that the entry's chunks are no longer on the
+// volume servers, so no amount of retrying will make the upload succeed.
+var ErrSourceDataGone = errors.New("source data no longer on the volume servers")
+
+// isSourceDataGone recognises the volume server answering 404 for a chunk the
+// filer still has an entry for. It happens whenever an event is replayed after
+// the file it refers to was deleted -- routinely, on any directory with churn,
+// after a -timeAgo re-seed.
+//
+// It has to be matched on the message. The read failure surfaces through the
+// AWS SDK as a RequestError, and "requesterror" is in
+// util.transientErrorMessages, so util.Retry classifies a permanently-dead
+// chunk as transient and retries it to exhaustion.
+func isSourceDataGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "404 not found") && strings.Contains(msg, "readdeleted=true")
+}
+
 func retriedWriteFile(client remote_storage.RemoteStorageClient, filerSource *source.FilerSource, newEntry *filer_pb.Entry, dest *remote_pb.RemoteStorageLocation) (remoteEntry *filer_pb.RemoteEntry, err error) {
 	var writeErr error
+	var sourceGone bool
 	err = util.Retry("writeFile", func() error {
 		reader := filer.NewFileReader(filerSource, newEntry)
 		glog.V(0).Infof("create %s", remote_storage.FormatLocation(dest))
 		remoteEntry, writeErr = client.WriteFile(dest, newEntry, reader)
 		if writeErr != nil {
+			if isSourceDataGone(writeErr) {
+				// Returning nil stops util.Retry immediately; the sentinel
+				// below is what the caller acts on.
+				sourceGone = true
+				return nil
+			}
 			return writeErr
 		}
 		return nil
 	})
+	if sourceGone {
+		return nil, ErrSourceDataGone
+	}
 	if err != nil {
 		glog.Errorf("write to %s: %v", dest, err)
 	}
