@@ -32,6 +32,10 @@ type MetaAggregator struct {
 	MetaLogBuffer  *log_buffer.LogBuffer
 	peerChans      map[pb.ServerAddress]chan struct{}
 	peerChansLock  sync.Mutex
+	// peerSetChanged is closed and replaced whenever the tracked peer set
+	// changes, so a caller can wait for one to appear rather than sampling
+	// HasRemotePeers once. Guarded by peerChansLock, with the map it reports on.
+	peerSetChanged chan struct{}
 	// peerWatermarks tracks, per subscribed peer (self included), the newest
 	// timestamp received on that peer's stream (event or idle heartbeat).
 	// The minimum is a delivery low-watermark: MetaLogBuffer is complete up
@@ -95,6 +99,7 @@ func (ma *MetaAggregator) OnPeerUpdate(update *master_pb.ClusterNodeUpdate, star
 		}
 		stopChan := make(chan struct{})
 		ma.peerChans[address] = stopChan
+		ma.notePeerSetChangedLocked()
 		// Account for the peer before its stream signals; keep prior values
 		// on reconnect.
 		ma.initPeerWatermark(address)
@@ -103,6 +108,7 @@ func (ma *MetaAggregator) OnPeerUpdate(update *master_pb.ClusterNodeUpdate, star
 		if prevChan, found := ma.peerChans[address]; found {
 			close(prevChan)
 			delete(ma.peerChans, address)
+			ma.notePeerSetChangedLocked()
 		}
 		// Only mark: dropping the watermarks at once would let subscribers
 		// advance past a flapping peer's unflushed events (see peerRemovedAtNs).
@@ -267,6 +273,27 @@ func lowWatermarkOf(watermarks map[pb.ServerAddress]int64) int64 {
 		}
 	}
 	return low
+}
+
+// PeerSetChangedChan returns a channel closed the next time the tracked peer
+// set changes. Callers must take it BEFORE reading HasRemotePeers and then
+// re-read the state after waking, so a peer arriving in between wakes them
+// instead of being missed.
+func (ma *MetaAggregator) PeerSetChangedChan() <-chan struct{} {
+	ma.peerChansLock.Lock()
+	defer ma.peerChansLock.Unlock()
+	if ma.peerSetChanged == nil {
+		ma.peerSetChanged = make(chan struct{})
+	}
+	return ma.peerSetChanged
+}
+
+// notePeerSetChangedLocked wakes everyone waiting on the peer set. Caller must
+// hold peerChansLock. Adds of self and removals wake waiters too: the waiters
+// re-read HasRemotePeers rather than trusting the edge, so a wake that turns
+// out to mean nothing costs one extra check.
+func (ma *MetaAggregator) notePeerSetChangedLocked() {
+	ma.peerSetChanged = closeWatermarkChan(ma.peerSetChanged)
 }
 
 func (ma *MetaAggregator) HasRemotePeers() bool {

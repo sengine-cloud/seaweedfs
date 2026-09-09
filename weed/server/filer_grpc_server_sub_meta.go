@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/seaweedfs/seaweedfs/weed/stats"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/seaweedfs/seaweedfs/weed/filer"
@@ -576,9 +579,101 @@ func (p *gapPass) park(ctx context.Context, cursor *log_buffer.MessagePosition, 
 	return gapContinue
 }
 
+// errAggregationAvailable ends a downgraded subscription once this filer learns
+// a peer, so the client reconnects onto the aggregated stream. Unavailable
+// rather than Internal: nothing went wrong, the answer just changed.
+var errAggregationAvailable = status.Error(codes.Unavailable,
+	"peer filers appeared; reconnect for the aggregated metadata stream")
+
+// subscribeLocalUntilPeersAppear serves an aggregated SubscribeMetadata request
+// from the filer-local stream for as long as this filer knows of no peers, and
+// ends it as soon as one appears.
+//
+// Serving it locally is correct while the cluster really is one filer: the
+// aggregated ring carries the same events, and the local stream reaches further
+// back, because it can read this filer's persisted logs from disk while the
+// ring is memory-only.
+//
+// What is not correct is deciding it once. The peer set is learned
+// asynchronously from the master, after the gRPC server is already accepting
+// subscriptions, so a client that connects inside that window used to be pinned
+// to a single filer's view for the entire life of the stream -- and a metadata
+// subscription is normally held open for the lifetime of the process holding
+// it. It saw only the writes this one filer served, with no error, no log line
+// distinguishing it from a deliberate SubscribeLocalMetadata call, and no way
+// to tell from the outside which stream it was on. filer.remote.sync is the
+// sharp case: a filer it never attached to serves a write, and that object is
+// simply never uploaded to the remote tier.
+//
+// Ending the stream is safe and costs almost nothing. FollowMetadata advances
+// its resume timestamp per processed event, so a reconnect re-reads at most the
+// events not yet acknowledged, and the callers of a metadata subscription
+// already retry it forever.
+func (fs *FilerServer) subscribeLocalUntilPeersAppear(req *filer_pb.SubscribeMetadataRequest, stream filer_pb.SeaweedFiler_SubscribeMetadataServer) error {
+	ma := fs.filer.MetaAggregator
+
+	glog.V(0).Infof("%v subscribe %s: no peer filers known, serving the local stream until one appears",
+		req.ClientName, req.PathPrefix)
+
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+
+	var upgraded atomic.Bool
+	go func() {
+		if !waitForRemotePeers(ctx, ma) {
+			return
+		}
+		upgraded.Store(true)
+		cancel()
+	}()
+
+	err := fs.SubscribeLocalMetadata(req, streamOnContext{stream, ctx})
+	if upgraded.Load() {
+		glog.V(0).Infof("%v subscribe %s: peer filers appeared, ending the local stream so it reconnects aggregated",
+			req.ClientName, req.PathPrefix)
+		return errAggregationAvailable
+	}
+	return err
+}
+
+// waitForRemotePeers blocks until the aggregator tracks a remote peer, or ctx
+// ends. Reports whether peers appeared.
+//
+// It re-reads the peer set on every wake rather than trusting the wake itself:
+// the channel fires on any change, including this filer registering itself and
+// a peer being removed. Taking the channel before the read is what closes the
+// lost-wakeup window -- a peer that arrives between the two wakes the next
+// select instead of being missed.
+func waitForRemotePeers(ctx context.Context, ma *filer.MetaAggregator) bool {
+	for {
+		changed := ma.PeerSetChangedChan()
+		if ma.HasRemotePeers() {
+			return true
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// streamOnContext runs a subscription on a context this server can cancel,
+// leaving the one gRPC gave the stream alone. The two Subscribe*Server types
+// are aliases of the same generic stream, so this stands in for either.
+type streamOnContext struct {
+	filer_pb.SeaweedFiler_SubscribeMetadataServer
+	ctx context.Context
+}
+
+func (s streamOnContext) Context() context.Context { return s.ctx }
+
 func (fs *FilerServer) SubscribeMetadata(req *filer_pb.SubscribeMetadataRequest, stream filer_pb.SeaweedFiler_SubscribeMetadataServer) error {
-	if fs.filer.MetaAggregator == nil || !fs.filer.MetaAggregator.HasRemotePeers() {
+	if fs.filer.MetaAggregator == nil {
 		return fs.SubscribeLocalMetadata(req, stream)
+	}
+	if !fs.filer.MetaAggregator.HasRemotePeers() {
+		return fs.subscribeLocalUntilPeersAppear(req, stream)
 	}
 
 	ctx := stream.Context()

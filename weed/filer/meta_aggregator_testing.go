@@ -10,6 +10,9 @@ import (
 func (ma *MetaAggregator) TrackPeerForTesting(peer pb.ServerAddress) {
 	ma.peerChansLock.Lock()
 	ma.peerChans[peer] = make(chan struct{})
+	// Wake peer-set waiters as OnPeerUpdate would, so a test can add a peer to
+	// a running filer and have the subscribers notice.
+	ma.notePeerSetChangedLocked()
 	ma.peerChansLock.Unlock()
 	ma.initPeerWatermark(peer)
 }
