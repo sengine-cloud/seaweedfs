@@ -1,0 +1,46 @@
+# Overlay build: the official 4.46 image with one patched binary.
+#
+# Carries a fix that is not upstream yet: SubscribeMetadata serves the
+# filer-LOCAL stream when the MetaAggregator has no remote peers, and decides
+# that once per stream. Peers arrive asynchronously from the master, so a
+# subscriber that connects inside that window is pinned to one filer's view for
+# the life of the stream -- which is how filer.remote.sync silently stopped
+# uploading writes served by the other filer (fluxcd-infra#312). The branch this
+# builds ends the downgraded stream when a peer appears so the client reconnects
+# onto the aggregated one.
+#
+# This is a FIELD TRIAL, not a fix we intend to carry. It is deployed to prove
+# the behaviour on a real cluster before it is proposed upstream against
+# seaweedfs/seaweedfs#11247. Drop it either when upstream takes a fix, or if the
+# trial says the approach is wrong.
+#
+# Unlike the 4.41 build this replaces, the patch is in the filer SERVER, so it
+# cannot be scoped to one pod: the Seaweed CRD's per-component `version` field
+# replaces only the tag on spec.image, never the registry. The whole cluster
+# runs this image for the duration of the trial.
+#
+# Deliberately NOT a fork of docker/Dockerfile.go_build. That file clones from
+# github.com/seaweedfs/seaweedfs at build time, so it would silently ignore
+# this branch's patch and produce a stock binary. It also builds the Rust
+# volume server and maintenance worker, or pulls them from CI artifacts --
+# reproducing that here would mean reproducing the whole release pipeline for
+# no gain. Taking the published image as the base keeps every other byte
+# (entrypoint, Rust binaries, labels) exactly as shipped, so the delta really
+# is the one commit.
+ARG BASE=chrislusf/seaweedfs:4.46
+
+FROM golang:1.25-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY . .
+ARG TARGETOS TARGETARCH
+# Same flags as the upstream image build: CGO-free, statically linked, and the
+# commit stamped into the version string so `weed version` identifies this
+# build rather than claiming to be stock 4.46.
+RUN cd weed \
+  && export LDFLAGS="-X github.com/seaweedfs/seaweedfs/weed/util/version.COMMIT=$(git rev-parse --short HEAD)" \
+  && export GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+  && CGO_ENABLED=0 go build -ldflags "-extldflags -static ${LDFLAGS}" -o /out/weed .
+
+FROM ${BASE}
+COPY --from=builder /out/weed /usr/bin/weed
