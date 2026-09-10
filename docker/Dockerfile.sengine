@@ -1,32 +1,42 @@
 # Overlay build: the official 4.46 image with one patched binary.
 #
-# Carries a fix that is not upstream yet: SubscribeMetadata serves the
-# filer-LOCAL stream when the MetaAggregator has no remote peers, and decides
-# that once per stream. Peers arrive asynchronously from the master, so a
-# subscriber that connects inside that window is pinned to one filer's view for
-# the life of the stream -- which is how filer.remote.sync silently stopped
-# uploading writes served by the other filer (fluxcd-infra#312). The branch this
-# builds ends the downgraded stream when a peer appears so the client reconnects
-# onto the aggregated one.
+# Carries TWO fixes that are merged or proposed upstream but in no release:
 #
-# This is a FIELD TRIAL, not a fix we intend to carry. It is deployed to prove
-# the behaviour on a real cluster before it is proposed upstream against
-# seaweedfs/seaweedfs#11247. Drop it either when upstream takes a fix, or if the
-# trial says the approach is wrong.
+#   1. seaweedfs#11247, fixed upstream by #11251 (commit 2cd6c36c5), cherry-picked
+#      here verbatim. SubscribeMetadata served the filer-LOCAL stream whenever the
+#      MetaAggregator knew no remote peers, and decided that once per stream. Peer
+#      discovery is asynchronous with the gRPC server accepting streams, so a
+#      subscriber connecting inside that window kept a partial view of the cluster
+#      for the life of the stream -- which is how filer.remote.sync silently
+#      stopped uploading writes served by the other filer (fluxcd-infra#312).
+#      We ran our own equivalent patch first; upstream's is cleaner
+#      (RemotePeerArrivedChan returns nil when peers are already known, taking the
+#      channel under the same lock as the check), so ours was dropped for theirs.
 #
-# Unlike the 4.41 build this replaces, the patch is in the filer SERVER, so it
-# cannot be scoped to one pod: the Seaweed CRD's per-component `version` field
-# replaces only the tag on spec.image, never the registry. The whole cluster
-# runs this image for the duration of the trial.
+#   2. seaweedfs#11261, ours, proposed upstream and not yet reviewed. A rename
+#      arrives as one update event whose NewEntry carries the SOURCE's
+#      RemoteEntry, so shouldSendToRemote answers "already synced" about a key
+#      that was never written and the update is skipped. The filer separately
+#      deletes the old object, so a rename leaves no copy at either key. Two
+#      objects lost per rename, silent below V(2). This is what cost linkwarden
+#      42 objects on 2026-09-09.
+#
+# This is a FIELD TRIAL, not a fork we intend to keep. Drop (1) when a release
+# contains #11251, and (2) when upstream takes or rejects #11261.
+#
+# The patch is in the filer SERVER, so it cannot be scoped to one pod: the
+# Seaweed CRD's per-component `version` field replaces only the tag on
+# spec.image, never the registry. The whole cluster runs this image for the
+# duration of the trial.
 #
 # Deliberately NOT a fork of docker/Dockerfile.go_build. That file clones from
 # github.com/seaweedfs/seaweedfs at build time, so it would silently ignore
-# this branch's patch and produce a stock binary. It also builds the Rust
+# this branch's patches and produce a stock binary. It also builds the Rust
 # volume server and maintenance worker, or pulls them from CI artifacts --
 # reproducing that here would mean reproducing the whole release pipeline for
 # no gain. Taking the published image as the base keeps every other byte
 # (entrypoint, Rust binaries, labels) exactly as shipped, so the delta really
-# is the one commit.
+# is the two commits.
 ARG BASE=chrislusf/seaweedfs:4.46
 
 FROM golang:1.26-alpine AS builder
