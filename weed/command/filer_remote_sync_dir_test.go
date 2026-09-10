@@ -629,3 +629,61 @@ func TestRetriedWriteFileStopsWhenSuperseded(t *testing.T) {
 		}
 	})
 }
+
+// TestShouldSkipUpdate pins the rule that keeps a rename from losing its remote
+// copy: an update may only be skipped when the destination key is unchanged.
+//
+// A rename arrives as one update event whose NewEntry carries the RemoteEntry of
+// the SOURCE, so shouldSendToRemote answers "already synced" about a key that has
+// never been written. The filer removes the old object once the source entry goes
+// away, so skipping on that answer leaves no copy at either key.
+func TestShouldSkipUpdate(t *testing.T) {
+	loc := func(dir, name string) *remote_pb.RemoteStorageLocation {
+		return &remote_pb.RemoteStorageLocation{Name: "b2", Bucket: "tier", Path: dir + "/" + name}
+	}
+	// Inherited from the source: describes the OLD key, and looks synced.
+	inherited := &filer_pb.RemoteEntry{StorageName: "b2", RemoteETag: "abc", RemoteSize: 2048, RemoteMtime: 2000}
+	synced := func() *filer_pb.Entry {
+		return &filer_pb.Entry{Name: "f.bin", RemoteEntry: inherited, Attributes: &filer_pb.FuseAttributes{Mtime: 1000}}
+	}
+	stale := &filer_pb.Entry{Name: "f.bin",
+		RemoteEntry: &filer_pb.RemoteEntry{StorageName: "b2", RemoteMtime: 500},
+		Attributes:  &filer_pb.FuseAttributes{Mtime: 1000}}
+	never := &filer_pb.Entry{Name: "f.bin", Attributes: &filer_pb.FuseAttributes{Mtime: 1000}}
+
+	tests := []struct {
+		name    string
+		oldDest *remote_pb.RemoteStorageLocation
+		dest    *remote_pb.RemoteStorageLocation
+		entry   *filer_pb.Entry
+		want    bool
+	}{
+		{
+			name:    "in place and already synced: nothing to do",
+			oldDest: loc("/a", "f.bin"), dest: loc("/a", "f.bin"), entry: synced(), want: true,
+		},
+		{
+			name:    "renamed across directories: must NOT skip, the new key was never written",
+			oldDest: loc("/a", "f.bin"), dest: loc("/b", "f.bin"), entry: synced(), want: false,
+		},
+		{
+			name:    "renamed within a directory: same, the key still changed",
+			oldDest: loc("/a", "f.bin"), dest: loc("/a", "g.bin"), entry: synced(), want: false,
+		},
+		{
+			name:    "in place but the remote copy is older than the file",
+			oldDest: loc("/a", "f.bin"), dest: loc("/a", "f.bin"), entry: stale, want: false,
+		},
+		{
+			name:    "in place and never replicated",
+			oldDest: loc("/a", "f.bin"), dest: loc("/a", "f.bin"), entry: never, want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSkipUpdate(tc.oldDest, tc.dest, tc.entry); got != tc.want {
+				t.Errorf("shouldSkipUpdate = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

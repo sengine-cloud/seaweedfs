@@ -223,7 +223,7 @@ func (option *RemoteSyncOptions) makeEventProcessor(remoteStorage *remote_pb.Rem
 			}
 			oldDest := toRemoteStorageLocation(util.FullPath(mountedDir), util.NewFullPath(resp.Directory, message.OldEntry.Name), remoteStorageMountLocation)
 			dest := toRemoteStorageLocation(util.FullPath(mountedDir), util.NewFullPath(message.NewParentPath, message.NewEntry.Name), remoteStorageMountLocation)
-			if !shouldSendToRemote(message.NewEntry) {
+			if shouldSkipUpdate(oldDest, dest, message.NewEntry) {
 				glog.V(2).Infof("skipping updating: %+v", resp)
 				return nil
 			}
@@ -385,6 +385,25 @@ func liveRemoteEntry(filerClient filer_pb.FilerClient, dir string, entry *filer_
 		return nil, err
 	}
 	return current.RemoteEntry, nil
+}
+
+// shouldSkipUpdate reports whether an update to an existing entry needs nothing
+// done on the remote.
+//
+// The destination key has to be unchanged for that to hold. A path change always
+// needs a write, because the entry's RemoteEntry describes the OLD key --
+// trusting it at a new one skips the only upload that would ever put an object
+// there. A rename arrives as a single update event whose NewEntry carries the
+// source's RemoteEntry, so shouldSendToRemote alone answers "already synced"
+// about a key that has never been written. The filer removes the old object
+// itself once the source entry goes away, so skipping leaves no copy at either
+// key: the file is present locally, reported as replicated, and absent from the
+// remote.
+func shouldSkipUpdate(oldDest, dest *remote_pb.RemoteStorageLocation, newEntry *filer_pb.Entry) bool {
+	if !proto.Equal(oldDest, dest) {
+		return false
+	}
+	return !shouldSendToRemote(newEntry)
 }
 
 func shouldSendToRemote(entry *filer_pb.Entry) bool {
