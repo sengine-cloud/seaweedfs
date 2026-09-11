@@ -1,0 +1,64 @@
+# Overlay build: the official 4.46 image with the weed binary rebuilt from
+# upstream master.
+#
+# Two fixes we depend on are merged upstream and in no release:
+#
+#   1. seaweedfs#11247, fixed by #11251 (commit 2cd6c36c5). SubscribeMetadata
+#      served the filer-LOCAL stream whenever the MetaAggregator knew no remote
+#      peers, and decided that once per stream. Peer discovery is asynchronous
+#      with the gRPC server accepting streams, so a subscriber connecting inside
+#      that window kept a partial view of the cluster for the life of the
+#      stream -- which is how filer.remote.sync silently stopped uploading
+#      writes served by the other filer (fluxcd-infra#312).
+#
+#   2. seaweedfs#11261, ours, fixed by #11270 (commit 80dae68db). A rename
+#      arrives as one update event whose NewEntry carries the SOURCE's
+#      RemoteEntry, so shouldSendToRemote answered "already synced" about a key
+#      that was never written and the update was skipped. The filer separately
+#      deletes the old object, so a rename left no copy at either key. Two
+#      objects lost per rename, silent below V(2). This is what cost linkwarden
+#      42 objects on 2026-09-09.
+#
+# Both were carried here as individual patches until 2026-09-11. They are now
+# upstream, so this branch carries no code changes of its own: the delta to
+# master is CI only.
+#
+# The cost of that is worth stating plainly. Building from master rather than
+# cherry-picking means the binary is ~34 commits past the 4.46 release, and
+# everything else on master rides along -- s3/iam, volume, and admin changes
+# that no release has shipped. The trial is no longer two isolated patches.
+# Drop this overlay entirely the moment a release contains both fixes; the
+# rollback is the stock 4.46 image, which the fluxcd-infra manifests name.
+#
+# The patches are in the filer SERVER, so they cannot be scoped to one pod: the
+# Seaweed CRD's per-component `version` field replaces only the tag on
+# spec.image, never the registry. Every pod the operator manages runs this
+# image for the duration of the trial, and so does the filer.remote.sync
+# Deployment, which is where fix (2) actually executes.
+#
+# Deliberately NOT a fork of docker/Dockerfile.go_build. That file clones from
+# github.com/seaweedfs/seaweedfs at build time, so it would silently ignore
+# this branch and produce a stock binary. It also builds the Rust volume server
+# and maintenance worker, or pulls them from CI artifacts -- reproducing that
+# here would mean reproducing the whole release pipeline for no gain. Taking
+# the published image as the base keeps every other byte (entrypoint, Rust
+# binaries, labels) exactly as shipped. Nothing we deploy runs those Rust
+# binaries: every pod's command is `weed <role>`, the Go build, so the 4.46
+# base and the master binary cannot disagree about anything we execute.
+ARG BASE=chrislusf/seaweedfs:4.46
+
+FROM golang:1.26-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY . .
+ARG TARGETOS TARGETARCH
+# Same flags as the upstream image build: CGO-free, statically linked, and the
+# commit stamped into the version string so `weed version` identifies this
+# build rather than claiming to be stock 4.46.
+RUN cd weed \
+  && export LDFLAGS="-X github.com/seaweedfs/seaweedfs/weed/util/version.COMMIT=$(git rev-parse --short HEAD)" \
+  && export GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+  && CGO_ENABLED=0 go build -ldflags "-extldflags -static ${LDFLAGS}" -o /out/weed .
+
+FROM ${BASE}
+COPY --from=builder /out/weed /usr/bin/weed
