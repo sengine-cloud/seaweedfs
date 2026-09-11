@@ -1,10 +1,10 @@
 # Builds this fork's seaweedfs image into the org OCI registry.
 #
-# Exists because seaweedfs/seaweedfs#11140 is not in a release yet: an entry
-# rewritten with identical content before it was ever replicated is never
-# uploaded to the remote tier. See docker/Dockerfile.sengine — this is the
-# published 4.41 image with one rebuilt binary, not a fork of the release
-# pipeline. The cluster should not run an image built on somebody's laptop.
+# Exists because seaweedfs/seaweedfs#11251 and #11270 are merged upstream but
+# in no release, and we need both. See docker/Dockerfile.sengine — this is the
+# published release image with the weed binary rebuilt from master, not a fork
+# of the release pipeline. The cluster should not run an image built on
+# somebody's laptop.
 #
 # workflow_dispatch only, deliberately. This repo is a PUBLIC fork, and the org
 # OCI credential is visible to every repo in the org, so there must be no event
