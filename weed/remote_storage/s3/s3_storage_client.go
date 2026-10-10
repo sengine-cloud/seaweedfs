@@ -610,7 +610,7 @@ func (s *s3RemoteStorageClient) UpdateFileMetadata(loc *remote_pb.RemoteStorageL
 			copyInput := &s3.CopyObjectInput{
 				Bucket:                  aws.String(loc.Bucket),
 				Key:                     aws.String(key),
-				CopySource:              aws.String(url.PathEscape(loc.Bucket + "/" + key)),
+				CopySource:              aws.String(s3CopySource(loc.Bucket, key)),
 				MetadataDirective:       aws.String(s3.MetadataDirectiveReplace),
 				Metadata:                headOut.Metadata,
 				ContentType:             headOut.ContentType,
@@ -698,7 +698,7 @@ func (s *s3RemoteStorageClient) CopyFile(src *remote_pb.RemoteStorageLocation, d
 		}); err != nil {
 			return nil, fmt.Errorf("copy s3 %s/%s to %s/%s: %w", src.Bucket, srcKey, dst.Bucket, dstKey, err)
 		}
-	} else if err = s.multipartCopy(headOut, copySource, size, dst.Bucket, dstKey, storageClass); err != nil {
+	} else if err = s.multipartCopy(headOut, src, copySource, size, dst.Bucket, dstKey, storageClass); err != nil {
 		return nil, fmt.Errorf("copy s3 %s/%s to %s/%s: %w", src.Bucket, srcKey, dst.Bucket, dstKey, err)
 	}
 
@@ -716,20 +716,44 @@ func s3CopySource(bucket, key string) string {
 }
 
 // multipartCopy copies an object above the CopyObject limit part by part. A
-// multipart upload does not inherit the source's metadata, so it is carried
-// over from the source's HeadObject.
-func (s *s3RemoteStorageClient) multipartCopy(headOut *s3.HeadObjectOutput, copySource *string, size int64, bucket, key string, storageClass *string) error {
-	createOut, err := s.conn.CreateMultipartUpload(&s3.CreateMultipartUploadInput{
-		Bucket:             aws.String(bucket),
-		Key:                aws.String(key),
-		Metadata:           headOut.Metadata,
-		ContentType:        headOut.ContentType,
-		ContentEncoding:    headOut.ContentEncoding,
-		CacheControl:       headOut.CacheControl,
-		ContentDisposition: headOut.ContentDisposition,
-		ContentLanguage:    headOut.ContentLanguage,
-		StorageClass:       storageClass,
-	})
+// multipart upload does not inherit the source's metadata or tags, so they are
+// carried over like CopyObject would: metadata from the source's HeadObject,
+// tags when the remote supports tagging.
+func (s *s3RemoteStorageClient) multipartCopy(headOut *s3.HeadObjectOutput, src *remote_pb.RemoteStorageLocation, copySource *string, size int64, bucket, key string, storageClass *string) error {
+	createInput := &s3.CreateMultipartUploadInput{
+		Bucket:                  aws.String(bucket),
+		Key:                     aws.String(key),
+		Metadata:                headOut.Metadata,
+		ContentType:             headOut.ContentType,
+		ContentEncoding:         headOut.ContentEncoding,
+		CacheControl:            headOut.CacheControl,
+		ContentDisposition:      headOut.ContentDisposition,
+		ContentLanguage:         headOut.ContentLanguage,
+		WebsiteRedirectLocation: headOut.WebsiteRedirectLocation,
+		StorageClass:            storageClass,
+	}
+	if headOut.Expires != nil {
+		if expires, parseErr := http.ParseTime(*headOut.Expires); parseErr == nil {
+			createInput.Expires = aws.Time(expires)
+		}
+	}
+	if s.conf.S3SupportTagging {
+		tagOut, tagErr := s.conn.GetObjectTagging(&s3.GetObjectTaggingInput{
+			Bucket: aws.String(src.Bucket),
+			Key:    aws.String(src.Path[1:]),
+		})
+		if tagErr != nil {
+			return fmt.Errorf("read tags: %w", tagErr)
+		}
+		if len(tagOut.TagSet) > 0 {
+			tags := url.Values{}
+			for _, tag := range tagOut.TagSet {
+				tags.Add(aws.StringValue(tag.Key), aws.StringValue(tag.Value))
+			}
+			createInput.Tagging = aws.String(tags.Encode())
+		}
+	}
+	createOut, err := s.conn.CreateMultipartUpload(createInput)
 	if err != nil {
 		return err
 	}

@@ -208,6 +208,38 @@ func TestRenameRemoteOnlyEntryOutOfItsMountIsRefused(t *testing.T) {
 	}
 }
 
+func TestRenameEmptyRemoteEntryDoesNotCopy(t *testing.T) {
+	// nothing to lose: no copy, and no refusal even out of the mount or
+	// without a copier; the sync writes an empty object at a new key
+	client := &renameRemoteClient{}
+	server, store := newRenameRemoteTestServer(t, client)
+	for _, path := range []string{"/buckets/b/src/empty", "/data/m/empty"} {
+		entry := remoteOnlyRenameEntry(path, 101)
+		entry.FileSize = 0
+		entry.Remote.RemoteSize = 0
+		store.entries[path] = entry
+	}
+
+	require.NoError(t, renameFile(server, "/buckets/b/src/empty", "/buckets/b/dst/empty"))
+	require.NoError(t, renameFile(server, "/data/m/empty", "/data/empty"))
+
+	assert.Equal(t, []string{"delete origin/src/empty", "delete origin/m/empty"}, client.recorded())
+}
+
+func TestRenameRemoteOnlyEntryFailingAfterTheCopyKeepsTheContent(t *testing.T) {
+	client := copyingRenameRemoteClient{&renameRemoteClient{}}
+	server, store := newRenameRemoteTestServer(t, client)
+	store.entries["/buckets/b/src/a.jpg"] = remoteOnlyRenameEntry("/buckets/b/src/a.jpg", 101)
+	store.commitErr = errors.New("commit failed")
+
+	err := renameFile(server, "/buckets/b/src/a.jpg", "/buckets/b/dst/a.jpg")
+	require.ErrorContains(t, err, "commit failed")
+
+	// remote changes are not rolled back with the store: the old object is
+	// gone, but only after the copy at the new key was written
+	assert.Equal(t, []string{"copy origin/src/a.jpg origin/dst/a.jpg", "delete origin/src/a.jpg"}, client.recorded())
+}
+
 func TestRenameEntryWithLocalDataDoesNotCopy(t *testing.T) {
 	client := copyingRenameRemoteClient{&renameRemoteClient{}}
 	server, store := newRenameRemoteTestServer(t, client)

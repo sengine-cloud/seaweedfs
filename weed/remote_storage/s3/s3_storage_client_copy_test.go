@@ -24,6 +24,7 @@ type copyObjectMock struct {
 	copyInputs  []*awss3.CopyObjectInput
 	partInputs  []*awss3.UploadPartCopyInput
 	createInput *awss3.CreateMultipartUploadInput
+	tagInputs   []*awss3.GetObjectTaggingInput
 	completed   *awss3.CompleteMultipartUploadInput
 	aborted     bool
 }
@@ -33,10 +34,19 @@ func (m *copyObjectMock) HeadObject(input *awss3.HeadObjectInput) (*awss3.HeadOb
 		return nil, awserr.NewRequestFailure(awserr.New("NotFound", "not found", nil), http.StatusNotFound, "")
 	}
 	return &awss3.HeadObjectOutput{
-		ContentLength: aws.Int64(m.size),
-		ContentType:   aws.String("image/jpeg"),
-		ETag:          aws.String(`"etag-` + aws.StringValue(input.Key) + `"`),
+		ContentLength:           aws.Int64(m.size),
+		ContentType:             aws.String("image/jpeg"),
+		Expires:                 aws.String("Wed, 21 Oct 2026 07:28:00 GMT"),
+		WebsiteRedirectLocation: aws.String("/elsewhere"),
+		ETag:                    aws.String(`"etag-` + aws.StringValue(input.Key) + `"`),
 	}, nil
+}
+
+func (m *copyObjectMock) GetObjectTagging(input *awss3.GetObjectTaggingInput) (*awss3.GetObjectTaggingOutput, error) {
+	m.tagInputs = append(m.tagInputs, input)
+	return &awss3.GetObjectTaggingOutput{TagSet: []*awss3.Tag{
+		{Key: aws.String("album"), Value: aws.String("2026 & co")},
+	}}, nil
 }
 
 func (m *copyObjectMock) CopyObject(input *awss3.CopyObjectInput) (*awss3.CopyObjectOutput, error) {
@@ -105,12 +115,30 @@ func TestS3CopyFileCopiesLargeObjectsInParts(t *testing.T) {
 	require.Empty(t, mock.copyInputs)
 	require.NotNil(t, mock.createInput)
 	require.Equal(t, "image/jpeg", aws.StringValue(mock.createInput.ContentType))
+	require.Equal(t, "/elsewhere", aws.StringValue(mock.createInput.WebsiteRedirectLocation))
+	require.Equal(t, int64(1792567680), aws.TimeValue(mock.createInput.Expires).Unix())
+	// tags only where the remote supports tagging
+	require.Empty(t, mock.tagInputs)
+	require.Nil(t, mock.createInput.Tagging)
 	require.Len(t, mock.partInputs, 11)
 	require.Equal(t, "bytes=0-536870911", aws.StringValue(mock.partInputs[0].CopySourceRange))
 	require.Equal(t, "bytes=5368709120-5368709120", aws.StringValue(mock.partInputs[10].CopySourceRange))
 	require.Len(t, mock.completed.MultipartUpload.Parts, 11)
 	require.Equal(t, int64(11), aws.Int64Value(mock.completed.MultipartUpload.Parts[10].PartNumber))
 	require.False(t, mock.aborted)
+}
+
+func TestS3CopyFileCarriesTagsIntoAMultipartCopy(t *testing.T) {
+	mock := &copyObjectMock{size: s3CopyObjectSizeLimit + 1}
+	client := newCopyTestClient(mock)
+	client.conf.S3SupportTagging = true
+
+	_, err := client.CopyFile(copySrc, copyDst)
+	require.NoError(t, err)
+
+	require.Len(t, mock.tagInputs, 1)
+	require.Equal(t, "src/a b.jpg", aws.StringValue(mock.tagInputs[0].Key))
+	require.Equal(t, "album=2026+%26+co", aws.StringValue(mock.createInput.Tagging))
 }
 
 func TestS3CopyFileAbortsAFailedMultipartCopy(t *testing.T) {
