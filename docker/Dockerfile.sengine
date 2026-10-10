@@ -16,8 +16,20 @@
 # lets the target's delete keep the copied key. Entries with local data rename
 # exactly as on stock 4.48.
 #
+# The image also carries the hardening that went into the upstream PR,
+# seaweedfs#11709: a copied entry's old key is deleted only after the rename
+# commits, a directory rename that copied a child does not sweep the old
+# prefix, and that delayed delete keeps a key a remote-only entry has taken
+# since. 4.48 has no metadata-only delete, so the old entry's delete uses
+# isFromOtherCluster to leave the remote object alone.
+#
+# And upstream's #11514 (a901c1a5e), cherry-picked verbatim: 4.48 compares
+# IF_ENTRY_EQUAL chunks by file_id, which an entry built from a metadata event
+# does not carry, so filer.remote.sync's remoteEntry stamps were refused as
+# stale for most new files and remote.uncache then skipped them.
+#
 # Drop this overlay when a release contains the fix (or upstream's take on
-# #11706), and put the stock tag back on the Seaweed CR.
+# #11706) and #11514, and put the stock tag back on the Seaweed CR.
 #
 # The patch is in the filer SERVER, so it cannot be scoped to one pod: the
 # Seaweed CRD's per-component `version` field replaces only the tag on
