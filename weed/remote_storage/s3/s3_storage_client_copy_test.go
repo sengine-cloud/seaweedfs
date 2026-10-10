@@ -46,6 +46,7 @@ func (m *copyObjectMock) GetObjectTagging(input *awss3.GetObjectTaggingInput) (*
 	m.tagInputs = append(m.tagInputs, input)
 	return &awss3.GetObjectTaggingOutput{TagSet: []*awss3.Tag{
 		{Key: aws.String("album"), Value: aws.String("2026 & co")},
+		{Key: aws.String("a+b"), Value: aws.String("x=y")},
 	}}, nil
 }
 
@@ -138,7 +139,7 @@ func TestS3CopyFileCarriesTagsIntoAMultipartCopy(t *testing.T) {
 
 	require.Len(t, mock.tagInputs, 1)
 	require.Equal(t, "src/a b.jpg", aws.StringValue(mock.tagInputs[0].Key))
-	require.Equal(t, "album=2026+%26+co", aws.StringValue(mock.createInput.Tagging))
+	require.Equal(t, "album=2026%20%26%20co&a%2Bb=x%3Dy", aws.StringValue(mock.createInput.Tagging))
 }
 
 func TestS3CopyFileAbortsAFailedMultipartCopy(t *testing.T) {

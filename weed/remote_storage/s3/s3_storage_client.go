@@ -705,6 +705,20 @@ func s3CopySource(bucket, key string) string {
 	return strings.Join(segments, "/")
 }
 
+// s3TaggingHeader encodes tags as the query string x-amz-tagging takes, with
+// spaces as %20: a + is read back as a space by some implementations and
+// literally by others
+func s3TaggingHeader(tagSet []*s3.Tag) string {
+	escape := func(s string) string {
+		return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
+	}
+	pairs := make([]string, 0, len(tagSet))
+	for _, tag := range tagSet {
+		pairs = append(pairs, escape(aws.StringValue(tag.Key))+"="+escape(aws.StringValue(tag.Value)))
+	}
+	return strings.Join(pairs, "&")
+}
+
 // multipartCopy copies an object above the CopyObject limit part by part. A
 // multipart upload does not inherit the source's metadata or tags, so they are
 // carried over like CopyObject would: metadata from the source's HeadObject,
@@ -736,11 +750,7 @@ func (s *s3RemoteStorageClient) multipartCopy(headOut *s3.HeadObjectOutput, src 
 			return fmt.Errorf("read tags: %w", tagErr)
 		}
 		if len(tagOut.TagSet) > 0 {
-			tags := url.Values{}
-			for _, tag := range tagOut.TagSet {
-				tags.Add(aws.StringValue(tag.Key), aws.StringValue(tag.Value))
-			}
-			createInput.Tagging = aws.String(tags.Encode())
+			createInput.Tagging = aws.String(s3TaggingHeader(tagOut.TagSet))
 		}
 	}
 	createOut, err := s.conn.CreateMultipartUpload(createInput)
