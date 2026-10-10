@@ -1,0 +1,50 @@
+# Overlay build: the official 4.48 image with one patched binary.
+#
+# Carries ONE fix, ours, reported upstream as seaweedfs#11706 and not yet
+# answered there. Renaming a file under a remote.mount whose content exists
+# only on the remote (never read since the mount, or remote.uncache'd) loses
+# it: the filer deletes the old object with the old entry, and with no chunks
+# nothing ever writes the new key. On 4.48 the new path then reads 503 for
+# good; the only remaining copy is the non-current version on B2.
+#
+# The patch copies the object on the remote (S3 CopyObject, UploadPartCopy
+# above 5 GB) before the rename changes anything, and stamps the new entry
+# with the copy's RemoteEntry, so filer.remote.sync sees the rename as already
+# done. A remote-only rename that would leave its mount is refused, and so,
+# on this build only, is a remote-only rename over an existing file: 4.48 and
+# our remote-sync digest predate the metadata-only delete marker (#11680) that
+# lets the target's delete keep the copied key. Entries with local data rename
+# exactly as on stock 4.48.
+#
+# Drop this overlay when a release contains the fix (or upstream's take on
+# #11706), and put the stock tag back on the Seaweed CR.
+#
+# The patch is in the filer SERVER, so it cannot be scoped to one pod: the
+# Seaweed CRD's per-component `version` field replaces only the tag on
+# spec.image, never the registry. The whole cluster runs this image.
+#
+# Deliberately NOT a fork of docker/Dockerfile.go_build. That file clones from
+# github.com/seaweedfs/seaweedfs at build time, so it would silently ignore
+# this branch's patches and produce a stock binary. It also builds the Rust
+# volume server and maintenance worker, or pulls them from CI artifacts --
+# reproducing that here would mean reproducing the whole release pipeline for
+# no gain. Taking the published image as the base keeps every other byte
+# (entrypoint, Rust binaries, labels) exactly as shipped, so the delta really
+# is the commits on this branch.
+ARG BASE=chrislusf/seaweedfs:4.48
+
+FROM golang:1.26-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY . .
+ARG TARGETOS TARGETARCH
+# Same flags as the upstream image build: CGO-free, statically linked, and the
+# commit stamped into the version string so `weed version` identifies this
+# build rather than claiming to be stock 4.48.
+RUN cd weed \
+  && export LDFLAGS="-X github.com/seaweedfs/seaweedfs/weed/util/version.COMMIT=$(git rev-parse --short HEAD)" \
+  && export GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+  && CGO_ENABLED=0 go build -ldflags "-extldflags -static ${LDFLAGS}" -o /out/weed .
+
+FROM ${BASE}
+COPY --from=builder /out/weed /usr/bin/weed
