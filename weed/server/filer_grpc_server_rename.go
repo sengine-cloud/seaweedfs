@@ -241,7 +241,7 @@ func (fs *FilerServer) moveSelfEntry(ctx context.Context, stream filer_pb.Seawee
 	// key, which a copy would have just written; a remote.sync from before the
 	// metadata-only delete marker cannot be told to keep it. So a remote-only
 	// entry is not renamed over an existing file on this build.
-	if existingTarget != nil && !entry.IsDirectory() && entry.Remote != nil && len(entry.Content) == 0 && len(entry.GetChunks()) == 0 {
+	if existingTarget != nil && !entry.IsDirectory() && entry.IsInRemoteOnly() && len(entry.Content) == 0 {
 		if mountDir, remoteLoc := fs.filer.RemoteStorage.FindMountDirectory(oldPath); remoteLoc != nil {
 			return fmt.Errorf("%s exists only on the remote of mount %s and cannot replace the existing %s; delete the target or cache the source first", oldPath, mountDir, newPath)
 		}
