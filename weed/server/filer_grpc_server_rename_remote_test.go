@@ -131,33 +131,27 @@ func TestRenameRemoteOnlyEntryCopiesBeforeDeletingTheOldObject(t *testing.T) {
 	assert.Equal(t, uint64(101), dst.Attr.Inode)
 }
 
-func TestRenameRemoteOnlyEntryOverTargetKeepsTheCopy(t *testing.T) {
+func TestRenameRemoteOnlyEntryOverAnExistingFileIsRefused(t *testing.T) {
 	client := copyingRenameRemoteClient{&renameRemoteClient{}}
 	server, store := newRenameRemoteTestServer(t, client)
 	store.entries["/buckets/b/src/a.jpg"] = remoteOnlyRenameEntry("/buckets/b/src/a.jpg", 101)
 	store.entries["/buckets/b/dst/a.jpg"] = remoteOnlyRenameEntry("/buckets/b/dst/a.jpg", 202)
-	queue := &captureQueue{}
-	swapNotificationQueue(t, queue)
 
-	require.NoError(t, renameFile(server, "/buckets/b/src/a.jpg", "/buckets/b/dst/a.jpg"))
+	err := renameFile(server, "/buckets/b/src/a.jpg", "/buckets/b/dst/a.jpg")
+	require.ErrorContains(t, err, "cannot replace the existing")
 
-	// the target's delete must not take the copy that replaced its object
-	assert.Equal(t, []string{"copy origin/src/a.jpg origin/dst/a.jpg", "delete origin/src/a.jpg"}, client.recorded())
-	events := queue.snapshot()
-	require.Len(t, events, 2)
-	assert.True(t, filer.IsMetadataOnlyDelete(events[0].notification.OldEntry), "the target's delete event must leave the remote object alone")
-	assert.False(t, filer.IsMetadataOnlyDelete(events[1].notification.OldEntry))
+	assert.Empty(t, client.recorded())
+	_, err = store.FindEntry(context.Background(), "/buckets/b/src/a.jpg")
+	require.NoError(t, err)
 	dst, err := store.FindEntry(context.Background(), "/buckets/b/dst/a.jpg")
 	require.NoError(t, err)
-	assert.Equal(t, uint64(101), dst.Attr.Inode)
-	assert.Equal(t, `"copy"`, dst.Remote.RemoteETag)
+	assert.Equal(t, uint64(202), dst.Attr.Inode)
 }
 
 func TestRenameRemoteOnlyEntryCopyFailureChangesNothing(t *testing.T) {
 	client := copyingRenameRemoteClient{&renameRemoteClient{copyErr: errors.New("copy refused")}}
 	server, store := newRenameRemoteTestServer(t, client)
 	store.entries["/buckets/b/src/a.jpg"] = remoteOnlyRenameEntry("/buckets/b/src/a.jpg", 101)
-	store.entries["/buckets/b/dst/a.jpg"] = remoteOnlyRenameEntry("/buckets/b/dst/a.jpg", 202)
 
 	err := renameFile(server, "/buckets/b/src/a.jpg", "/buckets/b/dst/a.jpg")
 	require.ErrorContains(t, err, "copy refused")
@@ -166,9 +160,8 @@ func TestRenameRemoteOnlyEntryCopyFailureChangesNothing(t *testing.T) {
 	src, err := store.FindEntry(context.Background(), "/buckets/b/src/a.jpg")
 	require.NoError(t, err)
 	assert.Equal(t, `"orig"`, src.Remote.RemoteETag)
-	dst, err := store.FindEntry(context.Background(), "/buckets/b/dst/a.jpg")
-	require.NoError(t, err)
-	assert.Equal(t, uint64(202), dst.Attr.Inode)
+	_, err = store.FindEntry(context.Background(), "/buckets/b/dst/a.jpg")
+	assert.ErrorIs(t, err, filer_pb.ErrNotFound)
 }
 
 func TestRenameRemoteOnlyEntryWithoutCopierIsRefused(t *testing.T) {
