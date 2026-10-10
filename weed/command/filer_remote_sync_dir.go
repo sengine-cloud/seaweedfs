@@ -203,6 +203,12 @@ func (option *RemoteSyncOptions) makeEventProcessor(remoteStorage *remote_pb.Rem
 				glog.V(0).Infof("rmdir  %s", remote_storage.FormatLocation(dest))
 				return client.RemoveDirectory(dest)
 			}
+			if held, err := heldByRemoteOnlyEntry(filerSource, resp.Directory, message.OldEntry.Name); err != nil {
+				return err
+			} else if held {
+				glog.V(0).Infof("keep %s: a remote-only entry has taken its path since", remote_storage.FormatLocation(dest))
+				return nil
+			}
 			glog.V(0).Infof("delete %s", remote_storage.FormatLocation(dest))
 			return client.DeleteFile(dest)
 		}
@@ -296,6 +302,21 @@ func processUpdateEvent(
 // the log, and the delete removes the remote object or the rewrite uploads the
 // current content. A lookup that fails for any other reason keeps the write
 // failure, so the event is retried.
+// heldByRemoteOnlyEntry reports whether a remote-only entry holds dir/name
+// now. A file deleted and then replaced by a remote-only rename has its
+// content only in the object at that key, so a delete event for the file that
+// went before must leave it.
+func heldByRemoteOnlyEntry(filerClient filer_pb.FilerClient, dir, name string) (bool, error) {
+	current, _, _, err := filer_pb.GetEntry(context.Background(), filerClient, util.NewFullPath(dir, name))
+	if errors.Is(err, filer_pb.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return current != nil && !filer.HasData(current) && current.IsInRemoteOnly(), nil
+}
+
 func isSuperseded(filerClient filer_pb.FilerClient, dir string, entry *filer_pb.Entry) bool {
 	current, _, _, err := filer_pb.GetEntry(context.Background(), filerClient, util.NewFullPath(dir, entry.Name))
 	if errors.Is(err, filer_pb.ErrNotFound) {

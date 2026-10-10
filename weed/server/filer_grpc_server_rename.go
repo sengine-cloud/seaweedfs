@@ -149,9 +149,18 @@ type metadataEvent struct {
 	oldEntry     *filer.Entry
 	newEntry     *filer.Entry
 	deleteChunks bool
+	// the old entry's remote object is deleted once the rename has committed:
+	// it, or an object under it, was copied to the new key, and a rename that
+	// fails must not lose it
+	deleteOldRemote bool
 }
 
 func (event metadataEvent) notify(f *filer.Filer, ctx context.Context, signatures []int32) {
+	if event.deleteOldRemote {
+		if err := f.DeleteFromRemote(ctx, event.oldEntry); err != nil {
+			glog.WarningfCtx(ctx, "delete remote object of renamed %s: %v", event.oldEntry.FullPath, err)
+		}
+	}
 	f.NotifyUpdateEvent(ctx, event.oldEntry, event.newEntry, event.deleteChunks, false, signatures)
 }
 
@@ -335,19 +344,33 @@ func (fs *FilerServer) moveSelfEntry(ctx context.Context, stream filer_pb.Seawee
 		})
 	}
 	*metadataEvents = append(*metadataEvents, metadataEvent{
-		oldEntry: sourceEntry,
-		newEntry: newEntry,
+		oldEntry:        sourceEntry,
+		newEntry:        newEntry,
+		deleteOldRemote: copiedRemote != nil,
 	})
+	selfEvent := len(*metadataEvents) - 1
 
 	if moveFolderSubEntries != nil {
 		if moveChildrenErr := moveFolderSubEntries(); moveChildrenErr != nil {
 			return moveChildrenErr
 		}
+		// removing the old directory on the remote removes every object under
+		// it, so it waits for the commit too once a child was copied
+		for _, event := range (*metadataEvents)[selfEvent+1:] {
+			if event.deleteOldRemote {
+				(*metadataEvents)[selfEvent].deleteOldRemote = true
+				break
+			}
+		}
 	}
 
 	// delete old entry
 	ctx = context.WithValue(ctx, "OP", "MV")
-	deleteErr := fs.filer.DeleteEntryMetaAndData(filer.WithSuppressedMetadataEvents(ctx), oldPath, false, false, false, false, signatures, 0)
+	// 4.48 has no metadata-only delete; a delete from another cluster is the
+	// one that leaves the remote object alone, and its events are suppressed
+	// here either way
+	keepOldRemote := (*metadataEvents)[selfEvent].deleteOldRemote
+	deleteErr := fs.filer.DeleteEntryMetaAndData(filer.WithSuppressedMetadataEvents(ctx), oldPath, false, false, false, keepOldRemote, signatures, 0)
 	if deleteErr != nil {
 		return deleteErr
 	}

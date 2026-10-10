@@ -880,3 +880,28 @@ func TestIsFailedPrecondition(t *testing.T) {
 		}
 	}
 }
+
+func TestHeldByRemoteOnlyEntry(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		entry *filer_pb.Entry
+		err   error
+		held  bool
+		fails bool
+	}{
+		{name: "nothing at the path", entry: nil},
+		{name: "remote-only entry", entry: &filer_pb.Entry{Name: "a", RemoteEntry: &filer_pb.RemoteEntry{RemoteSize: 10}}, held: true},
+		{name: "entry with local data", entry: &filer_pb.Entry{Name: "a", Content: []byte("x"), RemoteEntry: &filer_pb.RemoteEntry{RemoteSize: 10}}},
+		{name: "lookup fails", err: errors.New("unavailable"), fails: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			held, err := heldByRemoteOnlyEntry(&stubFilerClient{entry: tt.entry, err: tt.err}, "/buckets/b", "a")
+			if (err != nil) != tt.fails {
+				t.Fatalf("err = %v, want failure %v", err, tt.fails)
+			}
+			if held != tt.held {
+				t.Errorf("held = %v, want %v", held, tt.held)
+			}
+		})
+	}
+}
