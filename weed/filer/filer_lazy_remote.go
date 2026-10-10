@@ -231,11 +231,12 @@ func (f *Filer) maybeDeleteFromRemote(ctx context.Context, entry *Entry) (bool, 
 // RemoteEntry of the copy. The rename deletes the old key along with the old
 // entry, and with no local data nothing would write the new key. It returns
 // nil when no copy is needed: the entry has local data, which the remote sync
-// uploads to the new key, or it is not under a remote mount. A rename that
+// uploads to the new key, it is empty, which the sync writes as an empty
+// object, or it is not under a remote mount. A rename that
 // moves such an entry out of its mount, or onto a remote that cannot copy, is
 // refused, since it would delete the only copy of the content.
 func (f *Filer) CopyRemoteOnlyEntry(ctx context.Context, entry *Entry, oldPath, newPath util.FullPath) (*filer_pb.RemoteEntry, error) {
-	if f.RemoteStorage == nil || entry.IsDirectory() || entry.Remote == nil || len(entry.Content) > 0 || len(entry.GetChunks()) > 0 {
+	if f.RemoteStorage == nil || entry.IsDirectory() || !entry.IsInRemoteOnly() || len(entry.Content) > 0 {
 		return nil, nil
 	}
 
