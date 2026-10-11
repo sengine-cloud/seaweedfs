@@ -28,8 +28,18 @@
 # does not carry, so filer.remote.sync's remoteEntry stamps were refused as
 # stale for most new files and remote.uncache then skipped them.
 #
+# The same image now also runs both filer.remote.sync daemons, which until
+# then ran an unreleased upstream dev build for its checkpoint fixes. Those
+# are backported here: #11569 (completed work does not pin the sync offset),
+# #11574 (a reconnect resumes from the processed watermark), #11581 (a
+# failure that pins the offset resubscribes) and #11584 (isSameChunks no
+# longer sorts the caller's chunks). With them, the daemons also get the
+# sync-side half of the rename fix: a delete event does not remove a key a
+# remote-only entry has taken since.
+#
 # Drop this overlay when a release contains the fix (or upstream's take on
-# #11706) and #11514, and put the stock tag back on the Seaweed CR.
+# #11706), #11514 and the four above, and put the stock tag back on the
+# Seaweed CR and the remote-sync Deployments.
 #
 # The patch is in the filer SERVER, so it cannot be scoped to one pod: the
 # Seaweed CRD's per-component `version` field replaces only the tag on
