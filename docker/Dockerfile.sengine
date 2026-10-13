@@ -37,9 +37,18 @@
 # sync-side half of the rename fix: a delete event does not remove a key a
 # remote-only entry has taken since.
 #
+# One more daemon fix, ours and not upstream yet: isSuperseded also skips an
+# event when the filer holds chunks the event did not. A mount flushes
+# metadata while chunk uploads are still running, so a big file copied in
+# through FUSE logs a create whose chunk list has holes. The stream reader
+# stops at the first hole, every retry sends a short multipart body, and the
+# old subset check kept the event live, so the daemon looped on it forever
+# and nothing after it in the log reached the remote. The later event with
+# the finished chunk list uploads the file.
+#
 # Drop this overlay when a release contains the fix (or upstream's take on
-# #11706), #11514 and the four above, and put the stock tag back on the
-# Seaweed CR and the remote-sync Deployments.
+# #11706), #11514, the four above and the isSuperseded change, and put the
+# stock tag back on the Seaweed CR and the remote-sync Deployments.
 #
 # The patch is in the filer SERVER, so it cannot be scoped to one pod: the
 # Seaweed CRD's per-component `version` field replaces only the tag on
