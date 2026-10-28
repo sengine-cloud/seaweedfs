@@ -14,9 +14,20 @@
 # nothing after it in the log reached the remote (2026-10-13, media sync). The
 # later event with the finished chunk list uploads the file.
 #
-# The fix is in `weed filer.remote.sync` only, so the Seaweed CR can run the
+# Sent upstream as seaweedfs#12176. It leaves one case open: a writer that
+# dies keeps its hole, nothing ever writes past it, and the event still
+# loops. chrislusf's follow-up seaweedfs#12178 (not merged yet) closes it,
+# and its three commits are cherry-picked here: the upload streams the
+# entry's declared size through ChunkReadAt, which zero-fills every range no
+# chunk covers, the same bytes a read of the entry returns. A sparse file
+# uploads its zeros instead of a truncated object, and a mid-write snapshot
+# uploads a zero-filled view that the finishing write's event replaces. The
+# guards that keep a remote-only entry from being uploaded at all are
+# unchanged.
+#
+# All of it is in `weed filer.remote.sync` only, so the Seaweed CR can run the
 # stock 4.51 tag; only the two remote-sync Deployments need this image. Drop
-# it when a release contains the isSuperseded change.
+# it when a release contains #12176 and #12178.
 #
 # The stock image reports `version 30GB 4.51 ffa87c25f`: the release build ran
 # one CI-only commit past the tag (#12070, nothing under weed/). This build
