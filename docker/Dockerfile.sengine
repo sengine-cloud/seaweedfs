@@ -1,0 +1,49 @@
+# Overlay build: the official 4.51 image with one patched binary.
+#
+# 4.51 carries everything the 4.48 overlay (@baba0ee) backported: the
+# remote-only rename fix (#11709), #11514, #11515, #11569, #11574, #11581,
+# #11584 and the same-second rewrite fix (#11715). Checked by ancestry on the
+# merge commits, not by release notes.
+#
+# What is left is one daemon fix, ours and not upstream yet: isSuperseded also
+# skips an event when the filer holds chunks the event did not. A mount
+# flushes metadata while chunk uploads are still running, so a big file copied
+# in through FUSE logs a create whose chunk list has holes. The stream reader
+# stops at the first hole, every retry sends a short multipart body, and the
+# old subset check kept the event live, so the daemon looped on it forever and
+# nothing after it in the log reached the remote (2026-10-13, media sync). The
+# later event with the finished chunk list uploads the file.
+#
+# The fix is in `weed filer.remote.sync` only, so the Seaweed CR can run the
+# stock 4.51 tag; only the two remote-sync Deployments need this image. Drop
+# it when a release contains the isSuperseded change.
+#
+# The stock image reports `version 30GB 4.51 ffa87c25f`: the release build ran
+# one CI-only commit past the tag (#12070, nothing under weed/). This build
+# stamps its own commit instead.
+#
+# Deliberately NOT a fork of docker/Dockerfile.go_build. That file clones from
+# github.com/seaweedfs/seaweedfs at build time, so it would silently ignore
+# this branch's patches and produce a stock binary. It also builds the Rust
+# volume server and maintenance worker, or pulls them from CI artifacts;
+# reproducing that here would mean reproducing the whole release pipeline for
+# no gain. Taking the published image as the base keeps every other byte
+# (entrypoint, Rust binaries, labels) exactly as shipped, so the delta really
+# is the commits on this branch.
+ARG BASE=chrislusf/seaweedfs:4.51@sha256:f7a49e3f3972ebed5be2ed4befa4a0c68eb7bdddba6e692d42729ceb545134b8
+
+FROM golang:1.26-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY . .
+ARG TARGETOS TARGETARCH
+# Same flags as the upstream image build: CGO-free, statically linked, and the
+# commit stamped into the version string so `weed version` identifies this
+# build rather than claiming to be stock 4.51.
+RUN cd weed \
+  && export LDFLAGS="-X github.com/seaweedfs/seaweedfs/weed/util/version.COMMIT=$(git rev-parse --short HEAD)" \
+  && export GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+  && CGO_ENABLED=0 go build -ldflags "-extldflags -static ${LDFLAGS}" -o /out/weed .
+
+FROM ${BASE}
+COPY --from=builder /out/weed /usr/bin/weed
